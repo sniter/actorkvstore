@@ -6,6 +6,7 @@ import scala.util.Random
 object Persistence:
   case class Persist(key: String, valueOption: Option[String], id: Long)
   case class Persisted(key: String, id: Long)
+  case object RetryPersist
 
   class PersistenceException extends Exception("Persistence failure")
 

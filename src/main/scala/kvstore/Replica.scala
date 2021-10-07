@@ -1,11 +1,12 @@
 package kvstore
 
 import akka.actor.{ OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated, ActorRef, Actor, actorRef2Scala }
-import kvstore.Arbiter.*
+import akka.event.Logging
 import akka.pattern.{ ask, pipe }
-import scala.concurrent.duration.*
 import akka.util.Timeout
+import scala.concurrent.duration.*
 import scala.util.Random
+import kvstore.Arbiter.*
 
 object Replica:
   sealed trait Operation:
@@ -22,12 +23,12 @@ object Replica:
 
   def props(arbiter: ActorRef, persistenceProps: Props): Props = Props(Replica(arbiter, persistenceProps))
 
-class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
+class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with AkkaHelpers:
   import Replica.*
   import Replicator.*
   import Persistence.*
   import context.dispatcher
-
+  
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
    */
@@ -39,6 +40,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
   var replicators = Set.empty[ActorRef]
   val random = Random()
   var oldSeq = -1L
+  var pending = Map.empty[Persisted, (Persist, ActorRef)]
 
   override def preStart(): Unit = {
     arbiter ! Join
@@ -46,7 +48,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
 
   def receive = {
     case JoinedPrimary   => context.become(leader)
-    case JoinedSecondary => context.become(replica)
+    case JoinedSecondary => 
+      scheduleOnce(RetryPersist)
+      context.become(replica)
   }
 
   /* TODO Behavior for  the leader role. */
@@ -98,15 +102,23 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
         }{ value =>
           kv = kv + (key -> value)
         }
-        persistence ! Persist(key, valueOpt, seq)
-        val replicator = sender
-        replicator ! SnapshotAck(key, seq)
-        // context.become(persisting(replicator), discardOld=true)
+        val newPersist = Persist(key, valueOpt, seq)
+        persistence ! newPersist
+        //replicator ! SnapshotAck(key, seq)
+        pending = pending + (Persisted(key, seq) -> (newPersist, sender))
       case Snapshot(key, valueOpt, seq) if seq - 1L <= oldSeq =>
-        val replicator = sender
-        replicator ! SnapshotAck(key, seq)
+        sender ! SnapshotAck(key, seq)
       case Snapshot(key, valueOpt, seq) if seq - 1L > oldSeq =>
         // Nothing happens
+      case persisted @ Persisted(key, seq) if pending.contains(persisted) =>
+        val (_, recipient) = pending(persisted)
+        recipient ! SnapshotAck(key, seq)
+        pending = pending - persisted
+      case RetryPersist if pending.nonEmpty =>
+        pending.foreach{
+          case (_, (persist, _)) => persistence ! persist
+        }
+        scheduleOnce(RetryPersist)
       case Get(key, id) =>
         sender ! GetResult(key, kv.get(key), id)
       case msg =>
@@ -114,12 +126,12 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
     }
   }
 
-  def persisting(replicator: ActorRef): Receive = {
-    case Persisted(key, seq) =>
-      replicator ! SnapshotAck(key, seq)
-      context.become(replica, discardOld=true)
-    case Get(key, id) =>
-      sender ! GetResult(key, kv.get(key), id)
-  }
+  // def persisting(replicator: ActorRef): Receive = {
+  //   case Persisted(key, seq) =>
+  //     replicator ! SnapshotAck(key, seq)
+  //     context.become(replica, discardOld=true)
+  //   case Get(key, id) =>
+  //     sender ! GetResult(key, kv.get(key), id)
+  // }
 
 

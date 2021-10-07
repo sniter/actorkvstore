@@ -20,10 +20,9 @@ object Replicator:
 
   def props(replica: ActorRef): Props = Props(Replicator(replica))
 
-class Replicator(val replica: ActorRef) extends Actor:
+class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
   import Replicator.*
   import context.dispatcher
-  val log = Logging(context.system, this)
   
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
@@ -44,16 +43,6 @@ class Replicator(val replica: ActorRef) extends Actor:
   override def preStart(): Unit = {
     scheduleOnce(UnackedResend)
   }
-  
-  def scheduleOnceDelay: FiniteDuration = 100.milliseconds
-
-  def scheduleOnce[T](duration: FiniteDuration, actor: ActorRef, msg: T): Unit = 
-    context.system.scheduler.scheduleOnce(scheduleOnceDelay, actor, msg)
-
-  def scheduleOnce[T](actor: ActorRef, msg: T): Unit = scheduleOnce[T](scheduleOnceDelay, actor, msg)
-  def scheduleOnce[T](msg: T): Unit = scheduleOnce[T](scheduleOnceDelay, self, msg)
-  def scheduleOnce[T](duration: FiniteDuration, msg: T): Unit = scheduleOnce[T](duration, self, msg)
-
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive =
