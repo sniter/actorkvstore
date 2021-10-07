@@ -106,7 +106,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor:
         val replicator = sender
         replicator ! SnapshotAck(key, seq)
       case Snapshot(key, valueOpt, seq) if seq - 1L > oldSeq =>
-        
+        // Nothing happens
       case Get(key, id) =>
         sender ! GetResult(key, kv.get(key), id)
       case msg =>

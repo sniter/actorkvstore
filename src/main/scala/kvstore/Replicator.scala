@@ -4,6 +4,7 @@ import akka.actor.Props
 import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.actorRef2Scala
+import akka.event.Logging
 import scala.concurrent.duration.*
 import java.time.Instant
 
@@ -14,7 +15,7 @@ object Replicator:
   case class Snapshot(key: String, valueOption: Option[String], seq: Long)
   case class SnapshotAck(key: String, seq: Long)
 
-  case class SnapshotTimeout(seq: Long)
+  case class SnapshotTimeout(snapshot: Snapshot)
   case object UnackedResend
 
   def props(replica: ActorRef): Props = Props(Replicator(replica))
@@ -22,6 +23,7 @@ object Replicator:
 class Replicator(val replica: ActorRef) extends Actor:
   import Replicator.*
   import context.dispatcher
+  val log = Logging(context.system, this)
   
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
@@ -40,27 +42,42 @@ class Replicator(val replica: ActorRef) extends Actor:
     ret
 
   override def preStart(): Unit = {
-    context.system.scheduler.scheduleWithFixedDelay(100.milliseconds, 100.milliseconds, self, UnackedResend)
+    scheduleOnce(UnackedResend)
   }
+  
+  def scheduleOnceDelay: FiniteDuration = 100.milliseconds
+
+  def scheduleOnce[T](duration: FiniteDuration, actor: ActorRef, msg: T): Unit = 
+    context.system.scheduler.scheduleOnce(scheduleOnceDelay, actor, msg)
+
+  def scheduleOnce[T](actor: ActorRef, msg: T): Unit = scheduleOnce[T](scheduleOnceDelay, actor, msg)
+  def scheduleOnce[T](msg: T): Unit = scheduleOnce[T](scheduleOnceDelay, self, msg)
+  def scheduleOnce[T](duration: FiniteDuration, msg: T): Unit = scheduleOnce[T](duration, self, msg)
+
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive =
     case request @ Replicate(key, value, id) =>
+      // log.error("Replicate: {} -> {}", key, value)
       val newSeq = nextSeq()
       val leader = sender
       val newSnapshot = Snapshot(key, value, newSeq)
       acks = acks + (newSeq -> (leader, request))
+      pending = pending :+ newSnapshot 
+      // log.error("{} ! {}", replica, newSnapshot)
       replica ! newSnapshot
-      context.system.scheduler.scheduleOnce(100.milliseconds, self, SnapshotTimeout(newSeq))
     case SnapshotAck(key, seq) =>
+      // log.error("Snapshot Ack: {}", key)
       val (leader, request) = acks(seq)
       leader ! Replicated(key, request.id)
       acks = acks - seq
-    case SnapshotTimeout(seq) if acks.contains(seq) =>
+      pending = pending.filterNot(s => s.seq == seq && s.key == key)
     case UnackedResend if pending.nonEmpty =>
+      // log.error("Resending...")
       pending.foreach { snapshot =>
+        // log.error("Resending {}", snapshot)
         replica ! snapshot
       }
-      pending = pending.empty
+      scheduleOnce(UnackedResend)
     case _ =>
 
