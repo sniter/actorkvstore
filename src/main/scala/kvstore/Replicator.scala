@@ -32,7 +32,7 @@ class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
   var acks = Map.empty[Long, (ActorRef, Replicate)]
   // a sequence of not-yet-sent snapshots (you can disregard this if not implementing batching)
   var pending = Vector.empty[Snapshot]
-  var pending2 = Vector.empty[(Instant, Snapshot)]
+  val role = "Replicator"
   
   var _seqCounter = 0L
   def nextSeq() =
@@ -43,28 +43,37 @@ class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
   override def preStart(): Unit = {
     scheduleOnce(UnackedResend)
   }
+
+  def requestExists(newRequest: Replicate): Boolean = 
+    acks.exists{
+      case (_, (_, Replicate(key, _, id))) => 
+        newRequest.id == id && newRequest.key == key
+    }
+  
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive =
+    case request @ Replicate(key, value, id) if requestExists(request) =>
+      // Do Nothing
     case request @ Replicate(key, value, id) =>
-      // log.error("Replicate: {} -> {}", key, value)
+      log.error(s"${role}.Replicate: ${key} -> ${id} = ${value}")
       val newSeq = nextSeq()
       val leader = sender
       val newSnapshot = Snapshot(key, value, newSeq)
-      acks = acks + (newSeq -> (leader, request))
+      acks += newSeq -> (leader, request)
       pending = pending :+ newSnapshot 
       // log.error("{} ! {}", replica, newSnapshot)
       replica ! newSnapshot
     case SnapshotAck(key, seq) =>
-      // log.error("Snapshot Ack: {}", key)
+      log.error(s"${role}.SnapshotAck: ${key} - ${seq}")
       val (leader, request) = acks(seq)
       leader ! Replicated(key, request.id)
-      acks = acks - seq
+      acks -= seq
       pending = pending.filterNot(s => s.seq == seq && s.key == key)
     case UnackedResend if pending.nonEmpty =>
       // log.error("Resending...")
       pending.foreach { snapshot =>
-        // log.error("Resending {}", snapshot)
+        // log.error(s"${role}.UnackedResend: Resending {} ...", snapshot)
         replica ! snapshot
       }
       scheduleOnce(UnackedResend)
