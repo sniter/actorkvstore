@@ -50,30 +50,31 @@ class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
         newRequest.id == id && newRequest.key == key
     }
   
+  // override def logMsg(msg: String): Unit = ()
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive =
     case request @ Replicate(key, value, id) if requestExists(request) =>
       // Do Nothing
     case request @ Replicate(key, value, id) =>
-      log.error(s"${role}.Replicate: ${key} -> ${id} = ${value}")
+      logMsg(s"${role}.Replicate: ${key} -> ${id} = ${value}")
       val newSeq = nextSeq()
       val leader = sender
       val newSnapshot = Snapshot(key, value, newSeq)
       acks += newSeq -> (leader, request)
       pending = pending :+ newSnapshot 
-      // log.error("{} ! {}", replica, newSnapshot)
+      logMsg(s"${replica} ! ${newSnapshot}")
       replica ! newSnapshot
-    case SnapshotAck(key, seq) =>
-      log.error(s"${role}.SnapshotAck: ${key} - ${seq}")
+    case SnapshotAck(key, seq) if acks contains seq =>
+      logMsg(s"${role}.SnapshotAck: ${key} - ${seq}")
       val (leader, request) = acks(seq)
       leader ! Replicated(key, request.id)
       acks -= seq
       pending = pending.filterNot(s => s.seq == seq && s.key == key)
     case UnackedResend if pending.nonEmpty =>
-      // log.error("Resending...")
+      // logMsg("Resending...")
       pending.foreach { snapshot =>
-        // log.error(s"${role}.UnackedResend: Resending {} ...", snapshot)
+        logMsg(s"${role}.UnackedResend: Resending ${snapshot} ...")
         replica ! snapshot
       }
       scheduleOnce(UnackedResend)

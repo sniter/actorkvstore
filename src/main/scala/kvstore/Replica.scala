@@ -80,7 +80,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     if (!pending.contains(expected)){
       val newPersist = Persist(key, valueOpt, seq)
       persistence ! newPersist
-      log.error(s"[MSG] ${newPersist}")
+      logMsg(s"[MSG] ${newPersist}")
       pending += expected -> (newPersist, currentTimestamp, sender)
     }
  
@@ -92,7 +92,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     if (!pendingReplications.contains(expected)){
       updateKv(msg.key, msg.valueOption)
       pendingReplications += expected -> (sender, msg, currentTimestamp, replicators.toSet)
-      log.error(s"Ticket: ${pendingReplications(expected)}")
+      logMsg(s"Ticket: ${pendingReplications(expected)}")
       replicators foreach { replicator =>
         replicator ! msg
       }
@@ -112,7 +112,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     secondaries -= replicaUnit
     replicators -= replicator
     context.stop(replicator)
-    log.error(s"[STOP] Stopping replicator <${replicator}> for <${replicaUnit}>")
+    logMsg(s"[STOP] Stopping replicator <${replicator}> for <${replicaUnit}>")
     replicator
   }
 
@@ -131,8 +131,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     val deadReplicas = secondaries.keySet -- replicas
     val newReplicas = replicas -- secondaries.keySet
     val oldReplicators = deadReplicas.toSeq.map(secondaries.apply)
-    deadReplicas.foreach(stopReplicator)
     oldReplicators.foreach(stopReplication)
+    deadReplicas.foreach(stopReplicator)
     newReplicas.foreach(createReplicator)
     
 
@@ -145,24 +145,26 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
         replicate(key, Some(value), idx)
     }
 
+  // override def logMsg(msg: String): Unit = ()
+
   /* TODO Behavior for  the leader role. */
   val leader: Receive = 
     case Replicas(replicas) =>
-      log.error(s"${role}.Replicas: ${replicas}")
+      logMsg(s"${role}.Replicas: ${replicas}")
       refreshReplicas(replicas)
 
     case Insert(key, value, id) => 
-      log.error(s"${role}.Insert: ${key} -> ${id} = ${value} @ ${sender}")
+      logMsg(s"${role}.Insert: ${key} -> ${id} = ${value} @ ${sender}")
       replicate(key, Some(value), id)
       // sender ! OperationAck(id)
 
     case Remove(key, id) => 
-      log.error(s"${role}.Remove: ${key} -> ${id}")
+      logMsg(s"${role}.Remove: ${key} -> ${id}")
       replicate(key, None, id)
       // sender ! OperationAck(id)
 
     case getRequest @ Get(key, id) if secondaries.isEmpty =>
-      log.error(s"${role}.Get[Leader]: ${key} -> ${id}")
+      logMsg(s"${role}.Get[Leader]: ${key} -> ${id}")
       sender ! GetResult(key, kv.get(key), id)
 
     case getRequest @ Get(key, id) =>
@@ -170,10 +172,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       val replicaUnit = random.shuffle(keys).head
       
       if (replicaUnit == self){
-        log.error(s"${role}.Get[Replica @Leader]: ${key} -> ${id}")
+        logMsg(s"${role}.Get[Replica @Leader]: ${key} -> ${id}")
         sender ! GetResult(key, kv.get(key), id)
       }else{
-        log.error(s"${role}.Get[Replica ${replicaUnit}]: ${key} -> ${id}")
+        logMsg(s"${role}.Get[Replica ${replicaUnit}]: ${key} -> ${id}")
         replicaUnit forward getRequest
       }
     case Terminated(replicaUnit) if secondaries.contains(replicaUnit) => 
@@ -181,13 +183,15 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
  
   val replication: Receive = 
     case done @ Replicated(key, id) if pendingReplications.contains(done) => 
-      log.error(s"${role}Replicated: ${key} -> ${id}")
+      logMsg(s"${role}.Replicated: ${key} -> ${id}")
       val (recipient, msg, created, pendingReplicas) = pendingReplications(done)
       if (pendingReplicas.size <= 1) {
         recipient ! OperationAck(id)
         pendingReplications -= done
+        logMsg(s"[REPLICATED] Closing ticket ${msg}")
       } else {
         pendingReplications += done -> (recipient, msg, currentTimestamp, pendingReplicas - sender)
+        logMsg(s"[REPLICATED] Waiting new replicated for ticket ${msg}")
       }
     case VerifyPendingReplica =>
       //log.error("VerifyPendingReplica...")
@@ -195,11 +199,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       pendingReplications.foreach{ 
         case (expectedResponse, (recipient, msg, created, replicaUnits)) =>
           if ((now - created) > 1.second.toMillis) {
-            log.error(s"${role}.VerifyPendingReplica: Drop replica ${msg}")
+            logMsg(s"${role}.VerifyPendingReplica: Drop replica ${msg}")
             recipient ! OperationFailed(expectedResponse.id)
             pendingReplications -= expectedResponse
           } else {
-            log.error(s"${role}.VerifyPendingReplica: Retry replica ${msg} @ ${replicaUnits}")
+            logMsg(s"${role}.VerifyPendingReplica: Retry replica ${msg} @ ${replicaUnits}")
             replicate(msg)
           }
       }
@@ -207,14 +211,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   val persistance: Receive = 
     case persisted @ Persisted(key, seq) if pending.contains(persisted) =>
-      log.error(s"${role}.Persisted: {} -> {}", key, seq)
+      logMsg(s"${role}.Persisted: ${key} -> ${seq}")
       val (_, created, recipient) = pending(persisted)
       recipient ! SnapshotAck(key, seq)
       pending -= persisted
     case RetryPersist if pending.nonEmpty =>
       pending.foreach{
         case (_, (persist, _, _)) => 
-          log.error(s"${role}.RetryPersist: Resending message {} ...", persist)
+          logMsg(s"${role}.RetryPersist: Resending message ${persist} ...")
           persistence ! persist
       }
       scheduleOnce(RetryPersist)
@@ -227,19 +231,19 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case Snapshot(key, valueOpt, seq) =>
       isValidSeq(seq) match {
         case 0L =>
-          log.error(s"${role}.Snapshot: {} {} {}", key, valueOpt, seq)
+          logMsg(s"${role}.Snapshot: ${key} -> ${seq} = ${valueOpt}")
           updateKv(key, valueOpt)
           persist(key, valueOpt, seq)
           oldSeq = seq
         case -1L =>
-          log.error(s"${role}.Snapshot[too old]: {} {} {}", key, valueOpt, seq)
+          logMsg(s"${role}.Snapshot[too old]: ${key} -> ${seq} = ${valueOpt}")
           sender ! SnapshotAck(key, seq)
         case 1L =>
-          log.error(s"${role}.Snapshot[too new]: {} {} {}", key, valueOpt, seq)
+          logMsg(s"${role}.Snapshot[too new]: ${key} -> ${seq} = ${valueOpt}")
           // Nothing happens
       }
     case Get(key, id) =>
-      log.error(s"${role}.Get: {} {} {}", key, kv.get(key), id)
+      logMsg(s"${role}.Get: ${key} -> ${id} = ${kv.get(key)}")
       sender ! GetResult(key, kv.get(key), id)
 
 
