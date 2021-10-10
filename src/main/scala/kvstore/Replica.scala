@@ -100,16 +100,24 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   def createReplicator(actor: ActorRef): Unit =
     val replicator = context.actorOf(Replicator.props(actor))
-    if (actor != self)
-      context.watch(actor)
     secondaries += (actor -> replicator)
     replicators += replicator
+    if (actor != self){
+      context.watch(actor)
+      restoreReplicaState(actor)
+    }
   
   def refreshReplicas(replicas: Set[ActorRef]): Unit = 
     (replicas -- secondaries.keySet).foreach(createReplicator)
 
   def isValidSeq(seq: Long): Long =
     math.signum(seq - 1L - oldSeq)
+
+  def restoreReplicaState(replica: ActorRef): Unit = 
+    kv.zipWithIndex.foreach{
+      case ((key, value), idx) => 
+        replicate(key, Some(value), idx)
+    }
 
   /* TODO Behavior for  the leader role. */
   val leader: Receive = 
