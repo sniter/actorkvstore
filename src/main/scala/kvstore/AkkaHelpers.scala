@@ -18,8 +18,8 @@ trait AkkaHelpers { this: Actor =>
     def scheduleOnce[T](duration: FiniteDuration, msg: T): Unit = scheduleOnce[T](duration, self, msg)
 
     def logMsg(msg: String): Unit = 
-        if (self.toString.toLowerCase contains "step6-case3"){
+        // if (self.toString.toLowerCase contains "step6-case3"){
             log.error(msg)
-        }
+        // }
     
 }
