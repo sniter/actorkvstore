@@ -107,18 +107,34 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       restoreReplicaState(actor)
     }
 
-  def stopReplicator(replicaUnit: ActorRef): Unit = {
+  def stopReplicator(replicaUnit: ActorRef): ActorRef = {
     val replicator = secondaries(replicaUnit)
     secondaries -= replicaUnit
     replicators -= replicator
     context.stop(replicator)
+    log.error(s"[STOP] Stopping replicator <${replicator}> for <${replicaUnit}>")
+    replicator
   }
+
+  def stopReplication(replicaUnit: ActorRef): Unit = 
+    pendingReplications.foreach{ 
+        case (key, value @ (_, _, _, replicas)) if replicas contains replicaUnit =>
+          if(replicas.size > 1){
+            pendingReplications += key -> value.copy(_4 = replicas - replicaUnit)
+          } else {
+            pendingReplications -= key
+          }
+        case (key, value @ (_, _, _, replicas)) =>
+    }
   
   def refreshReplicas(replicas: Set[ActorRef]): Unit = 
     val deadReplicas = secondaries.keySet -- replicas
     val newReplicas = replicas -- secondaries.keySet
+    val oldReplicators = deadReplicas.toSeq.map(secondaries.apply)
     deadReplicas.foreach(stopReplicator)
+    oldReplicators.foreach(stopReplication)
     newReplicas.foreach(createReplicator)
+    
 
   def isValidSeq(seq: Long): Long =
     math.signum(seq - 1L - oldSeq)
@@ -177,13 +193,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       //log.error("VerifyPendingReplica...")
       val now = currentTimestamp
       pendingReplications.foreach{ 
-        case (expectedResponse, (recipient, msg, created, numLeft)) =>
+        case (expectedResponse, (recipient, msg, created, replicaUnits)) =>
           if ((now - created) > 1.second.toMillis) {
             log.error(s"${role}.VerifyPendingReplica: Drop replica ${msg}")
             recipient ! OperationFailed(expectedResponse.id)
             pendingReplications -= expectedResponse
           } else {
-            log.error(s"${role}.VerifyPendingReplica: Retry replica ${msg}")
+            log.error(s"${role}.VerifyPendingReplica: Retry replica ${msg} @ ${replicaUnits}")
             replicate(msg)
           }
       }
