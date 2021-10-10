@@ -106,9 +106,19 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
       context.watch(actor)
       restoreReplicaState(actor)
     }
+
+  def stopReplicator(replicaUnit: ActorRef): Unit = {
+    val replicator = secondaries(replicaUnit)
+    secondaries -= replicaUnit
+    replicators -= replicator
+    context.stop(replicator)
+  }
   
   def refreshReplicas(replicas: Set[ActorRef]): Unit = 
-    (replicas -- secondaries.keySet).foreach(createReplicator)
+    val deadReplicas = secondaries.keySet -- replicas
+    val newReplicas = replicas -- secondaries.keySet
+    deadReplicas.foreach(stopReplicator)
+    newReplicas.foreach(createReplicator)
 
   def isValidSeq(seq: Long): Long =
     math.signum(seq - 1L - oldSeq)
@@ -150,11 +160,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
         log.error(s"${role}.Get[Replica ${replicaUnit}]: ${key} -> ${id}")
         replicaUnit forward getRequest
       }
-    case Terminated(replicaUnit) if secondaries.contains(replicaUnit) =>
-      val replicator = secondaries(replicaUnit)
-      secondaries -= replicaUnit
-      replicators -= replicator
-      context.stop(replicator)
+    case Terminated(replicaUnit) if secondaries.contains(replicaUnit) => 
+      stopReplicator(replicaUnit)
  
   val replication: Receive = 
     case done @ Replicated(key, id) if pendingReplications.contains(done) => 
