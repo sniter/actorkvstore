@@ -49,22 +49,39 @@ class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
       case (_, (_, Replicate(key, _, id))) => 
         newRequest.id == id && newRequest.key == key
     }
+
+  def findRequest(msg: Replicate): Option[Long] = 
+    acks.find{
+      case (_, (_, Replicate(key, _, id))) => 
+        msg.id == id && msg.key == key
+    }.map(_._1)
   
   // override def logMsg(msg: String): Unit = ()
+
+  def replicateMsg(msg: Replicate): Unit = {
+    val seqOpt = findRequest(msg)
+    val snapshotOpt = seqOpt.flatMap(seq => pending.find(_.seq == seq))
+
+    snapshotOpt.fold{
+      val newSeq = nextSeq()
+      val leader = sender
+      val newSnapshot = Snapshot(msg.key, msg.valueOption, newSeq)
+      acks += newSeq -> (leader, msg)
+      pending = pending :+ newSnapshot 
+      logMsg(s"[SNAPSHOT] ${replica} ! ${newSnapshot}")
+      replica ! newSnapshot
+    } { snapshot => 
+      // ...
+      logMsg(s"[*SNAPSHOT] ${replica} ! ${snapshot}")
+      replica ! snapshot
+    }
+  }
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive =
-    case request @ Replicate(key, value, id) if requestExists(request) =>
-      // Do Nothing
     case request @ Replicate(key, value, id) =>
       logMsg(s"${role}.Replicate: ${key} -> ${id} = ${value}")
-      val newSeq = nextSeq()
-      val leader = sender
-      val newSnapshot = Snapshot(key, value, newSeq)
-      acks += newSeq -> (leader, request)
-      pending = pending :+ newSnapshot 
-      logMsg(s"${replica} ! ${newSnapshot}")
-      replica ! newSnapshot
+      replicateMsg(request)
     case SnapshotAck(key, seq) if acks contains seq =>
       logMsg(s"${role}.SnapshotAck: ${key} - ${seq}")
       val (leader, request) = acks(seq)
@@ -72,7 +89,7 @@ class Replicator(val replica: ActorRef) extends Actor with AkkaHelpers:
       acks -= seq
       pending = pending.filterNot(s => s.seq == seq && s.key == key)
     case UnackedResend if pending.nonEmpty =>
-      // logMsg("Resending...")
+      logMsg("Resending...")
       pending.foreach { snapshot =>
         logMsg(s"${role}.UnackedResend: Resending ${snapshot} ...")
         replica ! snapshot

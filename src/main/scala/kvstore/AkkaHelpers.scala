@@ -17,9 +17,23 @@ trait AkkaHelpers { this: Actor =>
     def scheduleOnce[T](msg: T): Unit = scheduleOnce[T](scheduleOnceDelay, self, msg)
     def scheduleOnce[T](duration: FiniteDuration, msg: T): Unit = scheduleOnce[T](duration, self, msg)
 
+    private val allowedTests = List(
+        // "step2-case4",
+
+        // "step4-case1",
+        // "step4-case2",
+        // "step4-case3",
+
+        // "step5-case1",
+        // "step5-case2",
+        // "step5-case3",
+
+        "step6-case3",
+        "integration-case1"
+    )
+
     def logMsg(msg: String): Unit = 
-        // if (self.toString.toLowerCase contains "step6-case3"){
+        allowedTests.find(name => self.toString.toLowerCase contains name).foreach{ _ =>
             log.error(msg)
-        // }
-    
+        }
 }

@@ -51,18 +51,19 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   override def preStart(): Unit = {
     arbiter ! Join
     persistence = context.actorOf(persistenceProps)
+    scheduleOnce(RetryPersist)
   }
 
   def receive = {
       case JoinedPrimary   => 
+        logMsg("[LEADER] Starting ...")
         role = "Leader"
         createReplicator(self)
         scheduleOnce(VerifyPendingReplica)
-        scheduleOnce(RetryPersist)
         context.become(leader orElse replication orElse replica orElse persistance)
       case JoinedSecondary => 
+        logMsg("[REPLICA] Starting ... ")
         role = "Replica"
-        scheduleOnce(RetryPersist)
         context.become(replica orElse persistance)
   }
 
@@ -74,15 +75,24 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     }{ value =>
       kv + (key -> value)
     } 
-
-  def persist(key: String, valueOpt: Option[String], seq:Long): Unit = 
-    val expected = Persisted(key, seq)
-    if (!pending.contains(expected)){
-      val newPersist = Persist(key, valueOpt, seq)
-      persistence ! newPersist
-      logMsg(s"[MSG] ${newPersist}")
-      pending += expected -> (newPersist, currentTimestamp, sender)
+  
+  def persist(msg: Snapshot, set: Boolean = false): Unit = 
+    val persistMsg = Persist(msg.key, msg.valueOption, msg.seq)
+    persistence ! persistMsg
+    val expected = Persisted(msg.key, msg.seq)
+    if (set){
+      logMsg(s"[PERSIST] ${msg}")
+      pending += expected -> (
+        persistMsg, 
+        currentTimestamp, 
+        sender
+      )
+      updateKv(msg.key, msg.valueOption)
+      oldSeq = msg.seq
+    } else {
+      logMsg(s"[PERSIST*] ${msg}")
     }
+  
  
   def replicate(key: String, valueOpt: Option[String], id:Long): Unit = 
     replicate(Replicate(key, valueOpt, id))
@@ -99,7 +109,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     }
 
   def createReplicator(actor: ActorRef): Unit =
-    val replicator = context.actorOf(Replicator.props(actor))
+    val replicator_suffix: String = 
+      if(actor != self)
+        "follower-" + random.alphanumeric.take(4).toSeq.mkString("")
+      else
+        "leader"
+    
+    val replicator = context.actorOf(Replicator.props(actor), s"replicator-${replicator_suffix}")
+    logMsg(s"[REPLICATOR] Starting replicator <${replicator}> for <${actor}>")
     secondaries += (actor -> replicator)
     replicators += replicator
     if (actor != self){
@@ -112,7 +129,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     secondaries -= replicaUnit
     replicators -= replicator
     context.stop(replicator)
-    logMsg(s"[STOP] Stopping replicator <${replicator}> for <${replicaUnit}>")
+    logMsg(s"[REPLICATOR] Stopping replicator <${replicator}> for <${replicaUnit}>")
     replicator
   }
 
@@ -156,12 +173,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case Insert(key, value, id) => 
       logMsg(s"${role}.Insert: ${key} -> ${id} = ${value} @ ${sender}")
       replicate(key, Some(value), id)
-      // sender ! OperationAck(id)
 
     case Remove(key, id) => 
       logMsg(s"${role}.Remove: ${key} -> ${id}")
       replicate(key, None, id)
-      // sender ! OperationAck(id)
 
     case getRequest @ Get(key, id) if secondaries.isEmpty =>
       logMsg(s"${role}.Get[Leader]: ${key} -> ${id}")
@@ -226,15 +241,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   /* TODO Behavior for the replica role. */
   val replica: Receive = 
-    case Snapshot(key, valueOpt, seq) if pending.contains(Persisted(key, seq)) =>
-      // Do nothing
-    case Snapshot(key, valueOpt, seq) =>
+    case shot @ Snapshot(key, valueOpt, seq) if pending.contains(Persisted(key,seq)) =>
+      persist(shot)
+    case shot @ Snapshot(key, valueOpt, seq) =>
       isValidSeq(seq) match {
         case 0L =>
           logMsg(s"${role}.Snapshot: ${key} -> ${seq} = ${valueOpt}")
-          updateKv(key, valueOpt)
-          persist(key, valueOpt, seq)
-          oldSeq = seq
+          persist(shot, set=true)
         case -1L =>
           logMsg(s"${role}.Snapshot[too old]: ${key} -> ${seq} = ${valueOpt}")
           sender ! SnapshotAck(key, seq)
