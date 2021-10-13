@@ -29,11 +29,13 @@ trait AkkaHelpers { this: Actor =>
         // "step5-case3",
 
         "step6-case3",
-        "integration-case1"
+        // "integration-case1",
+        // "integration-case2",
+        "integration-case3",
     )
 
     def logMsg(msg: String): Unit = 
         allowedTests.find(name => self.toString.toLowerCase contains name).foreach{ _ =>
-            log.error(msg)
+            log.debug(msg)
         }
 }

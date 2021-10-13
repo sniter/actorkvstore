@@ -135,10 +135,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   def stopReplication(replicaUnit: ActorRef): Unit = 
     pendingReplications.foreach{ 
-        case (key, value @ (_, _, _, replicas)) if replicas contains replicaUnit =>
+        case (key, value @ (_, msg, _, replicas)) if replicas contains replicaUnit =>
+          
           if(replicas.size > 1){
+            logMsg(s"[REPLICATION] Stopping replication ${msg} for ${replicaUnit}")
             pendingReplications += key -> value.copy(_4 = replicas - replicaUnit)
           } else {
+            logMsg(s"[REPLICATION*] Stopping replication ${msg}")
             pendingReplications -= key
           }
         case (key, value @ (_, _, _, replicas)) =>
@@ -198,43 +201,48 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
  
   val replication: Receive = 
     case done @ Replicated(key, id) if pendingReplications.contains(done) => 
-      logMsg(s"${role}.Replicated: ${key} -> ${id}")
+      logMsg(s"${role}.Replicated: ${key} -> ${id} @ ${sender}")
       val (recipient, msg, created, pendingReplicas) = pendingReplications(done)
       if (pendingReplicas.size <= 1) {
         recipient ! OperationAck(id)
         pendingReplications -= done
-        logMsg(s"[REPLICATED] Closing ticket ${msg}")
+        logMsg(s"[REPLICATED] From ${sender}\nClosing ticket ${msg}")
       } else {
         pendingReplications += done -> (recipient, msg, currentTimestamp, pendingReplicas - sender)
-        logMsg(s"[REPLICATED] Waiting new replicated for ticket ${msg}")
+        logMsg(s"[REPLICATED] From ${sender}\nWaiting next replicated for ticket ${msg} from:\n${pendingReplicas.mkString("\n")}")
       }
     case VerifyPendingReplica =>
-      //log.error("VerifyPendingReplica...")
-      val now = currentTimestamp
-      pendingReplications.foreach{ 
-        case (expectedResponse, (recipient, msg, created, replicaUnits)) =>
-          if ((now - created) > 1.second.toMillis) {
-            logMsg(s"${role}.VerifyPendingReplica: Drop replica ${msg}")
-            recipient ! OperationFailed(expectedResponse.id)
-            pendingReplications -= expectedResponse
-          } else {
-            logMsg(s"${role}.VerifyPendingReplica: Retry replica ${msg} @ ${replicaUnits}")
-            replicate(msg)
-          }
+      if (pendingReplications.nonEmpty){
+        logMsg(s"Pending persist:\n${pendingReplications.toSeq.map(v => v._1 -> v._2._4).mkString("\n")}\n")
+        val now = currentTimestamp
+        pendingReplications.foreach{ 
+          case (expectedResponse, (recipient, msg, created, replicaUnits)) =>
+            if ((now - created) > 1.second.toMillis) {
+              logMsg(s"${role}.VerifyPendingReplica: Drop replica ${msg}")
+              recipient ! OperationFailed(expectedResponse.id)
+              pendingReplications -= expectedResponse
+            } else {
+              logMsg(s"${role}.VerifyPendingReplica: Retry replica ${msg} @ ${replicaUnits}")
+              replicate(msg)
+            }
+        }
       }
       scheduleOnce(VerifyPendingReplica)
 
   val persistance: Receive = 
     case persisted @ Persisted(key, seq) if pending.contains(persisted) =>
-      logMsg(s"${role}.Persisted: ${key} -> ${seq}")
+      logMsg(s"${role}.Persisted: ${key} -> ${seq} from ${sender}")
       val (_, created, recipient) = pending(persisted)
       recipient ! SnapshotAck(key, seq)
       pending -= persisted
-    case RetryPersist if pending.nonEmpty =>
-      pending.foreach{
-        case (_, (persist, _, _)) => 
-          logMsg(s"${role}.RetryPersist: Resending message ${persist} ...")
-          persistence ! persist
+    case RetryPersist  =>
+      if (pending.nonEmpty){
+        logMsg(s"Pending persist:\n${pending.toSeq.map(v => v._1 -> v._2._3).mkString("\n")}\n")
+        pending.foreach{
+          case (_, (persist, _, _)) => 
+            logMsg(s"${role}.RetryPersist: Resending message ${persist} ...")
+            persistence ! persist
+        }
       }
       scheduleOnce(RetryPersist)
 
@@ -242,6 +250,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   /* TODO Behavior for the replica role. */
   val replica: Receive = 
     case shot @ Snapshot(key, valueOpt, seq) if pending.contains(Persisted(key,seq)) =>
+      logMsg(s"${role}.Snapshot[retry]: ${key} -> ${seq} = ${valueOpt}")
       persist(shot)
     case shot @ Snapshot(key, valueOpt, seq) =>
       isValidSeq(seq) match {
